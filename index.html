@@ -2,50 +2,38 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Audiobook Sleep Player v3</title>
+    <title>Audiobook Sleep Player v4</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: sans-serif; background: #121212; color: #e0e0e0; text-align: center; padding: 15px; margin: 0; }
         .timer-controls { margin: 10px 0; display: flex; align-items: center; justify-content: center; gap: 15px; }
         .val { font-size: 28px; font-weight: bold; min-width: 50px; }
-        .adj-btn { width: 44px !important; height: 44px; padding: 0 !important; font-size: 20px !important; border-radius: 22px !important; background: #444 !important; }
-        
+        .adj-btn { width: 44px; height: 44px; font-size: 20px; border-radius: 22px; background: #333; color: white; border: 1px solid #444; }
         #status { font-size: 0.9em; color: #888; margin: 5px 0; height: 1.2em; }
-        #timeLeft { font-size: 24px; color: #00ff00; margin: 10px 0; font-family: monospace; }
-        #trackProgress { font-size: 18px; color: #aaa; margin: 5px 0; font-family: monospace; }
-        
+        #timeLeft { font-size: 32px; color: #00ff00; margin: 10px 0; font-family: monospace; }
+        #trackProgress { font-size: 16px; color: #aaa; margin: 5px 0; font-family: monospace; }
         .skip-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0; }
         .skip-btn { padding: 12px 5px; font-size: 14px; background: #2a2a2a; border: 1px solid #444; color: #bbb; border-radius: 8px; }
-        
-        .main-controls { display: flex; gap: 10px; justify-content: center; margin-top: 15px; }
-        button { cursor: pointer; border: none; color: white; border-radius: 10px; }
-        .arm-btn { width: 100%; padding: 20px; font-size: 18px; background: #1a4a1a; }
-        .reset-btn { flex: 1; padding: 15px; background: #333; border: 1px solid #555; }
-        .stop-btn { flex: 1; padding: 15px; background: #600; }
-        
-        #fileInput { margin: 15px 0; padding: 10px; background: #222; border: 1px solid #444; color: white; width: 90%; }
+        .arm-btn { width: 100%; padding: 25px; font-size: 22px; background: #1a4a1a; color: white; border: none; border-radius: 12px; font-weight: bold; letter-spacing: 2px; }
+        .main-controls { display: flex; gap: 10px; margin-top: 15px; }
+        .reset-btn { flex: 1; padding: 15px; background: #333; color: white; border: 1px solid #555; border-radius: 10px; }
+        .stop-btn { flex: 1; padding: 15px; background: #600; color: white; border: none; border-radius: 10px; }
+        #fileInput { display: none; }
+        .file-label { display: inline-block; padding: 10px; background: #222; border: 1px dashed #444; margin: 10px 0; width: 80%; border-radius: 8px; cursor: pointer; font-size: 12px; }
     </style>
-   <link rel="manifest" href="manifest.json">
-
-<script>
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js');
-  }
-</script>
 </head>
 <body>
 
-    <h2 style="margin-bottom:5px;">Sleep Player</h2>
+    <h2 style="letter-spacing: 1px;">SLEEP PLAYER</h2>
     
     <div class="timer-controls">
         <button class="adj-btn" onclick="adjustTime(-1)">&minus;</button>
         <span id="timeVal" class="val">12</span>
         <button class="adj-btn" onclick="adjustTime(1)">+</button>
     </div>
-    <div style="font-size: 11px; color: #666;">SET SLEEP MINUTES</div>
 
     <div id="timeLeft">00:00</div>
-    <div id="status">Ready</div>
+    <div id="status">STANDBY</div>
 
     <div class="skip-row">
         <button class="skip-btn" onclick="seekRelative(-600)">&minus;10m</button>
@@ -60,86 +48,111 @@
 
     <div id="trackProgress">--:-- / --:--</div>
 
-    <input type="file" id="fileInput" multiple accept="audio/*">
+    <input type="file" id="fileInput" accept="audio/*" onchange="handleFileSelect(this)">
+    <label for="fileInput" class="file-label" id="fileLabel">IMPORT NEW AUDIO</label>
     
-    <button id="startBtn" class="arm-btn" onclick="initSystem()">ARM & PLAY</button>
+    <button id="startBtn" class="arm-btn" onclick="initSystem()">ARM</button>
 
     <div class="main-controls" id="activeControls" style="display:none;">
         <button class="reset-btn" onclick="resetMasterTimer()">RESET TIMER</button>
-        <button class="stop-btn" onclick="stopEverything('Manual Stop')">STOP</button>
+        <button class="stop-btn" onclick="stopEverything('ABORTED')">STOP</button>
     </div>
 
     <script>
         let audioCtx, gainNode, currentSource, audioBuffer;
-        let fileQueue = [];
-        let currentIndex = 0;
-        let masterTimer, displayInterval;
-        let sleepMinutes = 12;
-        let startTime, targetEndTime;
-        let wakeLock = null;
-        let currentOffset = 0; 
-        let playbackStartTime = 0;
+        let sleepMinutes = 12, startTime, targetEndTime, wakeLock = null;
+        let playbackStartTime = 0, displayInterval, masterTimer;
+
+        // DB Setup for retention
+        const dbName = "SleepPlayerDB";
+        let db;
+        const request = indexedDB.open(dbName, 1);
+        request.onupgradeneeded = (e) => {
+            e.target.result.createObjectStore("audio", { keyPath: "id" });
+        };
+        request.onsuccess = (e) => {
+            db = e.target.result;
+            checkStoredFile();
+        };
 
         function adjustTime(delta) {
             sleepMinutes = Math.max(1, sleepMinutes + delta);
             document.getElementById('timeVal').innerText = sleepMinutes;
         }
 
-        async function initSystem() {
-            const fileInput = document.getElementById('fileInput');
-            if (fileInput.files.length === 0) return alert("Select files first");
-            
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            gainNode = audioCtx.createGain();
-            gainNode.connect(audioCtx.destination);
-            
-            if (typeof DeviceMotionEvent.requestPermission === 'function') {
-                try { await DeviceMotionEvent.requestPermission(); } catch(e) {}
-            }
-            try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
-
-            fileQueue = Array.from(fileInput.files);
-            currentIndex = 0;
-            
-            document.getElementById('startBtn').style.display = 'none';
-            document.getElementById('activeControls').style.display = 'flex';
-            
-            playTrack(currentIndex);
-            resetMasterTimer();
-            window.addEventListener('devicemotion', handleMotion);
-            
-            displayInterval = setInterval(updateDisplays, 1000);
+        async function checkStoredFile() {
+            const tx = db.transaction("audio", "readonly");
+            const store = tx.objectStore("audio");
+            const getReq = store.get("currentTrack");
+            getReq.onsuccess = () => {
+                if (getReq.result) {
+                    const data = getReq.result;
+                    document.getElementById('fileLabel').innerText = "LOADED: " + data.name;
+                    updateStatus("SYSTEM READY", false);
+                }
+            };
         }
 
-        function playTrack(index, offset = 0) {
-            if (index >= fileQueue.length) {
-                stopEverything("Playlist Finished");
-                return;
-            }
-
+        async function handleFileSelect(input) {
+            const file = input.files[0];
+            if (!file) return;
+            updateStatus("IMPORTING...", true);
+            
             const reader = new FileReader();
-            reader.onload = async (e) => {
-                audioBuffer = await audioCtx.decodeAudioData(e.target.result);
-                startBufferSource(offset);
+            reader.onload = (e) => {
+                const tx = db.transaction("audio", "readwrite");
+                tx.objectStore("audio").put({
+                    id: "currentTrack",
+                    name: file.name,
+                    data: e.target.result,
+                    lastPos: 0
+                });
+                tx.oncomplete = () => {
+                    document.getElementById('fileLabel').innerText = "LOADED: " + file.name;
+                    updateStatus("IMPORT COMPLETE", false);
+                };
             };
-            reader.readAsArrayBuffer(fileQueue[index]);
+            reader.readAsArrayBuffer(file);
+        }
+
+        async function initSystem() {
+            const tx = db.transaction("audio", "readonly");
+            const store = tx.objectStore("audio");
+            const getReq = store.get("currentTrack");
+            
+            getReq.onsuccess = async () => {
+                if (!getReq.result) return alert("Please import a file first.");
+                
+                const trackData = getReq.result;
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                gainNode = audioCtx.createGain();
+                gainNode.connect(audioCtx.destination);
+                
+                if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                    try { await DeviceMotionEvent.requestPermission(); } catch(e) {}
+                }
+                try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+
+                updateStatus("INITIALIZING...", true);
+                audioBuffer = await audioCtx.decodeAudioData(trackData.data.slice(0));
+                
+                document.getElementById('startBtn').style.display = 'none';
+                document.getElementById('activeControls').style.display = 'flex';
+                
+                const startPos = parseFloat(localStorage.getItem('savedPos') || 0);
+                startBufferSource(startPos);
+                resetMasterTimer();
+                window.addEventListener('devicemotion', handleMotion);
+                displayInterval = setInterval(updateDisplays, 1000);
+            };
         }
 
         function startBufferSource(offset) {
             if (currentSource) { try { currentSource.stop(); } catch(e){} }
-            
             currentSource = audioCtx.createBufferSource();
             currentSource.buffer = audioBuffer;
             currentSource.connect(gainNode);
-            
             playbackStartTime = audioCtx.currentTime - offset;
-            currentSource.onended = () => {
-                const elapsed = audioCtx.currentTime - playbackStartTime;
-                if (elapsed >= audioBuffer.duration - 0.5) {
-                    currentIndex++;
-                    playTrack(currentIndex);
-                }
-            };
             currentSource.start(0, offset);
         }
 
@@ -148,28 +161,19 @@
             let currentPos = audioCtx.currentTime - playbackStartTime;
             let newTime = Math.max(0, Math.min(audioBuffer.duration, currentPos + seconds));
             startBufferSource(newTime);
-            updateStatus("Jumped to " + formatTime(newTime), true);
-        }
-
-        function formatTime(seconds) {
-            const m = Math.floor(seconds / 60);
-            const s = Math.floor(seconds % 60);
-            return `${m}:${s.toString().padStart(2, '0')}`;
         }
 
         function updateDisplays() {
-            // 1. Update Sleep Timer
             const now = Date.now();
             const diff = Math.max(0, targetEndTime - now);
-            const m = Math.floor(diff / 60000);
-            const s = Math.floor((diff % 60000) / 1000);
+            const m = Math.floor(diff / 60000), s = Math.floor((diff % 60000) / 1000);
             document.getElementById('timeLeft').innerText = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
 
-            // 2. Update Track Progress
             if (currentSource && audioBuffer) {
                 let currentPos = audioCtx.currentTime - playbackStartTime;
                 document.getElementById('trackProgress').innerText = 
                     `${formatTime(currentPos)} / ${formatTime(audioBuffer.duration)}`;
+                localStorage.setItem('savedPos', currentPos);
             }
         }
 
@@ -177,28 +181,24 @@
             clearTimeout(masterTimer);
             gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
             gainNode.gain.setValueAtTime(1.0, audioCtx.currentTime);
-            
             startTime = Date.now();
             targetEndTime = startTime + (sleepMinutes * 60 * 1000);
-            updateStatus("Timer Reset", true);
-            
-            let fadeStartTimeMs = (sleepMinutes * 60 * 1000) - 30000;
-            masterTimer = setTimeout(startFadeOut, Math.max(0, fadeStartTimeMs)); 
+            updateStatus("ARMED", true);
+            masterTimer = setTimeout(() => {
+                gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 30);
+                updateStatus("FADING...", false);
+            }, (sleepMinutes * 60 * 1000) - 30000);
         }
 
-        function startFadeOut() {
-            updateStatus("Fading out...", false);
-            const now = audioCtx.currentTime;
-            gainNode.gain.setValueAtTime(1.0, now);
-            gainNode.gain.linearRampToValueAtTime(0.0, now + 30);
-        }
-
-        function handleMotion(event) {
-            let acc = event.accelerationIncludingGravity;
+        function handleMotion(e) {
+            let acc = e.accelerationIncludingGravity;
             if (!acc) return;
-            if (acc.z < -8) { stopEverything("Flipped Face-Down"); return; }
-            let total = Math.abs(acc.x) + Math.abs(acc.y) + Math.abs(acc.z);
-            if (total > 18) { resetMasterTimer(); }
+            if (acc.z < -8) stopEverything("FLIPPED");
+            if (Math.abs(acc.x) + Math.abs(acc.y) + Math.abs(acc.z) > 18) resetMasterTimer();
+        }
+
+        function formatTime(s) {
+            return `${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,'0')}`;
         }
 
         function updateStatus(msg, active) {
@@ -208,15 +208,12 @@
         }
 
         function stopEverything(msg) {
-            clearTimeout(masterTimer);
-            clearInterval(displayInterval);
+            clearTimeout(masterTimer); clearInterval(displayInterval);
             if (currentSource) try { currentSource.stop(); } catch(e){}
             if (wakeLock) try { wakeLock.release(); } catch(e){}
-            window.removeEventListener('devicemotion', handleMotion);
             updateStatus(msg, false);
             document.getElementById('startBtn').style.display = 'block';
             document.getElementById('activeControls').style.display = 'none';
-            document.getElementById('trackProgress').innerText = "--:-- / --:--";
         }
     </script>
 </body>
